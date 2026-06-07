@@ -217,7 +217,9 @@ CREATE TABLE background_tasks (
     user_id         INTEGER NOT NULL,
     task            background_tasks_type NOT NULL,
     created         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    metadata        JSONB
+    metadata        JSONB,
+    status          background_tasks_status_type NOT NULL DEFAULT 'pending',
+    claimed_at      TIMESTAMP WITH TIME ZONE
 );
 
 CREATE TABLE user_data_export (

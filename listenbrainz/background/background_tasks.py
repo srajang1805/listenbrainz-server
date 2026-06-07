@@ -8,6 +8,9 @@ from listenbrainz.background.export import export_user
 from listenbrainz.webserver import create_app, db_conn, ts_conn
 from listenbrainz.background.listens_importer import import_listens
 
+CLAIM_TIMEOUT = "60 minutes"
+
+
 def add_task(user_id, task):
     """ Add a task to the background tasks """
     query = "INSERT INTO background_tasks (user_id, task) VALUES (:user_id, :task) ON CONFLICT DO NOTHING"
@@ -20,9 +23,32 @@ def get_task():
     # todo: use for update skip locked to scale to multiple workers
     #  but that needs ensuring tasks processing doesn't interfere with
     #  the task retrieval and deletion.
-    query = "SELECT * FROM background_tasks ORDER BY created LIMIT 1"
-    result = db_conn.execute(text(query))
-    return result.first()
+    with db_conn.begin():
+        db_conn.execute(
+            text("""
+                UPDATE background_tasks
+                   SET status = 'pending', claimed_at = NULL
+                 WHERE status = 'running'
+                   AND claimed_at < NOW() - CAST(:timeout AS INTERVAL)
+            """),
+            {"timeout": CLAIM_TIMEOUT}
+        )
+        result = db_conn.execute(
+            text("""
+                UPDATE background_tasks
+                   SET status = 'running', claimed_at = NOW()
+                 WHERE id = (
+                     SELECT id
+                       FROM background_tasks
+                      WHERE status = 'pending'
+                      ORDER BY created
+                      LIMIT 1
+                      FOR UPDATE SKIP LOCKED
+                 )
+                 RETURNING *
+            """)
+        )
+        return result.first()
 
 
 def remove_task(task):
@@ -49,6 +75,8 @@ class BackgroundTasks:
                 current_app.logger.error(f"Unknown task type: {task}")
         except Exception:
             current_app.logger.error("Error processing task:", exc_info=True)
+            return False
+        return True
 
     def start(self):
         current_app.logger.info("Background tasks processor started.")
@@ -58,8 +86,8 @@ class BackgroundTasks:
                 if task is None:
                     time.sleep(current_app.config.get("BACKGROUND_TASKS_SLEEP_TIME", 5))
                     continue
-                self.process_task(task)
-                remove_task(task)
+                if self.process_task(task):
+                    remove_task(task)
             except KeyboardInterrupt:
                 current_app.logger.error("Keyboard interrupt!")
                 break

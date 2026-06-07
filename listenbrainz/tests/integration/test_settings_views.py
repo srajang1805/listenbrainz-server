@@ -1,10 +1,12 @@
 import json
+import threading
 import time
 
 from brainzutils import cache
+from sqlalchemy import text
 
 import listenbrainz.db.user as db_user
-from listenbrainz.background.background_tasks import get_task
+from listenbrainz.background.background_tasks import add_task, get_task, remove_task
 from listenbrainz.listenstore.timescale_listenstore import REDIS_USER_LISTEN_COUNT
 from listenbrainz.listenstore.timescale_utils import recalculate_all_user_data
 from listenbrainz.tests.integration import IntegrationTestCase
@@ -111,3 +113,67 @@ class SettingsViewsTestCase(IntegrationTestCase):
         resp = self.client.get(self.custom_url_for('api_v1.latest_import', user_name=self.user['musicbrainz_id']))
         self.assert200(resp)
         self.assertEqual(resp.json['latest_import'], 0)
+
+    def test_two_workers_cannot_claim_same_task(self):
+        user2 = db_user.create(self.db_conn, 2, 'testuser2')
+
+        self.db_conn.execute(
+            text("INSERT INTO background_tasks (user_id, task) VALUES (:u1, 'delete_listens'), (:u2, 'delete_listens')"),
+            {"u1": self.user["id"], "u2": user2}
+        )
+        self.db_conn.commit()
+
+        results = []
+
+        def worker():
+            with self.app.app_context():
+                task = get_task()
+                results.append(task.id if task is not None else None)
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        claimed = [tid for tid in results if tid is not None]
+        self.assertEqual(len(claimed), 2)
+        self.assertEqual(len(set(claimed)), 2)
+
+    def test_crashed_worker_does_not_lose_task(self):
+        self.db_conn.execute(
+            text("INSERT INTO background_tasks (user_id, task) VALUES (:uid, 'delete_listens')"),
+            {"uid": self.user["id"]}
+        )
+        self.db_conn.commit()
+
+        with self.app.app_context():
+            task = get_task()
+            self.assertIsNotNone(task)
+            self.assertEqual(task.status, "running")
+            claimed_id = task.id
+
+        row = self.db_conn.execute(
+            text("SELECT id, status FROM background_tasks WHERE id = :id"),
+            {"id": claimed_id}
+        ).first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.status, "running")
+
+    def test_successful_processing_removes_task(self):
+        self.db_conn.execute(
+            text("INSERT INTO background_tasks (user_id, task) VALUES (:uid, 'delete_listens')"),
+            {"uid": self.user["id"]}
+        )
+        self.db_conn.commit()
+
+        with self.app.app_context():
+            task = get_task()
+            self.assertIsNotNone(task)
+            remove_task(task)
+
+        row = self.db_conn.execute(
+            text("SELECT id FROM background_tasks WHERE id = :id"),
+            {"id": task.id}
+        ).first()
+        self.assertIsNone(row)

@@ -21,6 +21,8 @@ CREATE TYPE do_not_recommend_entity_type AS ENUM ('artist', 'release', 'release_
 
 CREATE TYPE background_tasks_type AS ENUM ('delete_listens', 'delete_user', 'export_all_user_data', 'import_listens');
 
+CREATE TYPE background_tasks_status_type AS ENUM ('pending', 'running', 'failed');
+
 CREATE TYPE user_data_export_status_type AS ENUM ('in_progress', 'waiting', 'completed', 'failed');
 
 CREATE TYPE user_data_export_type_type AS ENUM ('export_all_user_data');
