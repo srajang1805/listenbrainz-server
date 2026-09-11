@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import Optional
 
 import jwt
 from flask import current_app
@@ -41,6 +42,36 @@ class AppleService(ExternalService):
             headers={"kid": self.apple_music_kid}
         )
         return {"access_token": token, "expires_at": exp}
+
+    def get_user(self, user_id: int, refresh: bool = False) -> Optional[dict]:
+        """ If refresh = True, then check whether the developer token has expired and
+        regenerate it before returning the user."""
+        user = super().get_user(user_id)
+        if user and refresh and self.user_oauth_token_has_expired(user):
+            user = self.refresh_access_token(user["user_id"])
+        return user
+
+    def refresh_access_token(self, user_id: int) -> dict:
+        """ Regenerate the Apple Music developer token for the given user.
+
+        Apple Music does not offer a refresh token flow like Spotify. Instead, the
+        developer token (stored as the access token) is a JWT that expires after
+        DEVELOPER_TOKEN_VALIDITY and must be regenerated. The user's MusicKit token
+        (stored as the refresh token) remains valid and is left unchanged.
+
+        Args:
+            user_id (int): the ListenBrainz row ID of the user whose token is to be refreshed
+
+        Returns:
+            user (dict): the same user with an updated developer token
+        """
+        token = self.fetch_access_token()
+        external_service_oauth.update_token(
+            db_conn, user_id=user_id, service=self.service,
+            access_token=token["access_token"], refresh_token=None,
+            expires_at=token["expires_at"]
+        )
+        return self.get_user(user_id)
 
     def add_new_user(self, user_id: int) -> bool:
         """ Create a new apple music row to store a user specific developer token
